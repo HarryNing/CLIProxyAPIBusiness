@@ -1,0 +1,20 @@
+# Local override example for running CPAB against an external PostgreSQL cluster.
+#
+# Usage:
+# 1. Copy this file to docker-compose.local.yml
+# 2. Set DB_CONNECTION in your local .env or shell environment
+# 3. Start only cpab so the bundled postgres service does not start:
+#    docker compose -f docker-compose.yml -f docker-compose.local.yml up -d cpab
+#
+# Preview merged config:
+#    docker compose -f docker-compose.yml -f docker-compose.local.yml config
+
+services:
+  postgres:
+    profiles:
+      - local-postgres
+
+  cpab:
+    environment:
+      DB_CONNECTION: ${DB_CONNECTION}
+    depends_on: !reset null
