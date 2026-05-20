@@ -1,8 +1,8 @@
-# CLIProxyAPI Business Edition
+# Legions AI
 
 English | [中文](README_CN.md)
 
-This is the Business version of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), it's designed for enterprise use.
+Legions AI is an API relay and metering platform for managed AI access.
 
 ## Contributing
 

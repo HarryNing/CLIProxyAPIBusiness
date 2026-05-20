@@ -265,7 +265,7 @@ func (h *MFAHandler) PrepareTOTP(c *gin.Context) {
 	}
 
 	key, err := totp.Generate(totp.GenerateOpts{
-		Issuer:      "CLIProxyAPI",
+		Issuer:      "Legions AI",
 		AccountName: admin.Username,
 	})
 	if err != nil {

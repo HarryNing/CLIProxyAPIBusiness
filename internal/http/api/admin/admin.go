@@ -23,7 +23,9 @@ func RegisterAdminRoutes(r *gin.Engine, db *gorm.DB, jwtCfg config.JWTConfig, co
 	}
 
 	healthHandler := handlers.NewHealthHandler(db)
-	r.GET("/healthz", healthHandler.Healthz)
+	if !routeExists(r, http.MethodGet, "/healthz") {
+		r.GET("/healthz", healthHandler.Healthz)
+	}
 
 	versionHandler := handlers.NewVersionHandler()
 	r.GET("/v0/version", versionHandler.GetVersion)
@@ -219,12 +221,27 @@ func RegisterAdminRoutes(r *gin.Engine, db *gorm.DB, jwtCfg config.JWTConfig, co
 		authed.POST("/tokens/gemini", tokenRequester.RequestGeminiCLIToken)
 		authed.POST("/tokens/codex", tokenRequester.RequestCodexToken)
 		authed.POST("/tokens/antigravity", tokenRequester.RequestAntigravityToken)
-		authed.POST("/tokens/qwen", tokenRequester.RequestQwenToken)
-		authed.POST("/tokens/iflow", tokenRequester.RequestIFlowToken)
-		authed.POST("/tokens/iflow-cookie", tokenRequester.RequestIFlowCookieToken)
+		authed.POST("/tokens/qwen", unavailableTokenRequester("qwen"))
+		authed.POST("/tokens/iflow", unavailableTokenRequester("iflow"))
+		authed.POST("/tokens/iflow-cookie", unavailableTokenRequester("iflow-cookie"))
 		authed.POST("/tokens/get-auth-status", tokenRequester.GetAuthStatus)
 		authed.POST("/tokens/oauth-callback", tokenRequester.PostOAuthCallback)
 	}
+}
+
+func unavailableTokenRequester(provider string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": provider + " token requester is not available in the current CLIProxyAPI SDK"})
+	}
+}
+
+func routeExists(r *gin.Engine, method, path string) bool {
+	for _, route := range r.Routes() {
+		if route.Method == method && route.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 // adminAuthMiddleware validates admin JWTs and loads admin context.

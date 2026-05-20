@@ -15,7 +15,7 @@ const (
 	// webAuthnRPID is the default relying party ID.
 	webAuthnRPID = "router-for.me"
 	// webAuthnRPName is the default relying party display name.
-	webAuthnRPName = "CLIProxyAPI Admin"
+	webAuthnRPName = "Legions AI Admin"
 	// webAuthnOrigin is the default WebAuthn origin.
 	webAuthnOrigin = "https://router-for.me"
 )
