@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPIBusiness/internal/modelmapping"
 	"github.com/router-for-me/CLIProxyAPIBusiness/internal/models"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 func TestSelectorEnforcesModelMappingUserGroupRestriction(t *testing.T) {
@@ -155,6 +156,7 @@ func TestSelectorFiltersAuthsByAuthGroupUserGroupRestriction(t *testing.T) {
 		t.Fatalf("create model mapping: %v", errCreate)
 	}
 	modelmapping.StoreModelMappings(now, []models.ModelMapping{mapping})
+	createTestBillingRule(t, conn, agAllowed.ID, group1.ID, "openai", "gpt-4", now)
 
 	selector := NewSelector(conn)
 	selector.rateLimiter = nil
@@ -183,6 +185,84 @@ func TestSelectorFiltersAuthsByAuthGroupUserGroupRestriction(t *testing.T) {
 	}
 	if meta["billing_user_group_id"] != strconv.FormatUint(group1.ID, 10) {
 		t.Fatalf("expected billing_user_group_id=%d, got %q", group1.ID, meta["billing_user_group_id"])
+	}
+}
+
+func TestSelectorRejectsModelWithoutBillingRule(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	conn, errOpen := db.Open(":memory:")
+	if errOpen != nil {
+		t.Fatalf("open db: %v", errOpen)
+	}
+	if errMigrate := db.Migrate(conn); errMigrate != nil {
+		t.Fatalf("migrate db: %v", errMigrate)
+	}
+
+	now := time.Now().UTC()
+	group := models.UserGroup{Name: "g1", IsDefault: true, CreatedAt: now, UpdatedAt: now}
+	if errCreate := conn.Create(&group).Error; errCreate != nil {
+		t.Fatalf("create user group: %v", errCreate)
+	}
+	user := models.User{
+		Username:    "user1",
+		Password:    "hashed",
+		UserGroupID: models.UserGroupIDs{&group.ID},
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if errCreate := conn.Create(&user).Error; errCreate != nil {
+		t.Fatalf("create user: %v", errCreate)
+	}
+
+	authGroup := models.AuthGroup{Name: "ag", IsDefault: true, UserGroupID: models.UserGroupIDs{&group.ID}, CreatedAt: now, UpdatedAt: now}
+	if errCreate := conn.Create(&authGroup).Error; errCreate != nil {
+		t.Fatalf("create auth group: %v", errCreate)
+	}
+	authRecord := models.Auth{
+		Key:         "auth-1",
+		AuthGroupID: models.AuthGroupIDs{&authGroup.ID},
+		Content:     datatypes.JSON([]byte(`{"type":"openai"}`)),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if errCreate := conn.Create(&authRecord).Error; errCreate != nil {
+		t.Fatalf("create auth record: %v", errCreate)
+	}
+
+	selector := NewSelector(conn)
+	selector.rateLimiter = nil
+	selector.resolveRateLimit = nil
+
+	ctx, _ := buildTestGinContext("/v1/chat/completions", user.ID)
+	auths := []*coreauth.Auth{{ID: authRecord.Key, Status: coreauth.StatusActive}}
+	if _, errPick := selector.Pick(ctx, "openai", "gpt-4", cliproxyexecutor.Options{}, auths); errPick == nil {
+		t.Fatalf("expected billing rule error, got nil")
+	} else if authErr, ok := errPick.(*coreauth.Error); !ok || authErr.Code != "billing_rule_not_found" {
+		t.Fatalf("expected billing_rule_not_found, got %T %v", errPick, errPick)
+	}
+}
+
+func createTestBillingRule(t *testing.T, conn *gorm.DB, authGroupID, userGroupID uint64, provider, model string, now time.Time) {
+	t.Helper()
+	input := 1.0
+	output := 1.0
+	zero := 0.0
+	rule := models.BillingRule{
+		AuthGroupID:           authGroupID,
+		UserGroupID:           userGroupID,
+		Provider:              provider,
+		Model:                 model,
+		BillingType:           models.BillingTypePerToken,
+		PriceInputToken:       &input,
+		PriceOutputToken:      &output,
+		PriceCacheCreateToken: &zero,
+		PriceCacheReadToken:   &zero,
+		IsEnabled:             true,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}
+	if errCreate := conn.Create(&rule).Error; errCreate != nil {
+		t.Fatalf("create billing rule: %v", errCreate)
 	}
 }
 

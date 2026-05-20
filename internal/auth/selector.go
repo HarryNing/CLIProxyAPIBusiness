@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPIBusiness/internal/billing"
 	"github.com/router-for-me/CLIProxyAPIBusiness/internal/modelmapping"
 	"github.com/router-for-me/CLIProxyAPIBusiness/internal/models"
 	"github.com/router-for-me/CLIProxyAPIBusiness/internal/ratelimit"
@@ -67,15 +68,19 @@ func (s *Selector) Pick(ctx context.Context, provider, model string, opts clipro
 	var (
 		authGroupIDByAuthKey  map[string]uint64
 		allowedUserGroupsByID map[uint64]models.UserGroupIDs
+		userGroupIDs          models.UserGroupIDs
+		billUserGroupIDs      models.UserGroupIDs
 		selectedUserGroupID   *uint64
 	)
 	if s != nil && s.db != nil && s.db.Config != nil {
 		userID, okUser := userIDFromContext(ctx)
 		if okUser {
-			userGroupIDs, billUserGroupIDs, errLoad := s.loadUserGroups(ctx, userID)
+			loadedUserGroupIDs, loadedBillUserGroupIDs, errLoad := s.loadUserGroups(ctx, userID)
 			if errLoad != nil {
 				return nil, newModelNotFoundError(provider, model)
 			}
+			userGroupIDs = loadedUserGroupIDs
+			billUserGroupIDs = loadedBillUserGroupIDs
 
 			if mappingUserGroupIDs, okMapping := modelmapping.LookupUserGroupIDs(provider, model); okMapping {
 				mappingUserGroupIDs = mappingUserGroupIDs.Clean()
@@ -114,12 +119,10 @@ func (s *Selector) Pick(ctx context.Context, provider, model string, opts clipro
 	if errPick != nil {
 		return nil, errPick
 	}
-	if errLimit := s.applyRateLimit(ctx, provider, model, selected); errLimit != nil {
-		return nil, errLimit
-	}
 
+	var billingUserGroupID *uint64
 	if selected != nil && authGroupIDByAuthKey != nil {
-		billingUserGroupID := selectedUserGroupID
+		billingUserGroupID = selectedUserGroupID
 		if billingUserGroupID == nil {
 			authKey := strings.TrimSpace(selected.ID)
 			authGroupID := authGroupIDByAuthKey[authKey]
@@ -136,6 +139,22 @@ func (s *Selector) Pick(ctx context.Context, provider, model string, opts clipro
 				}
 			}
 		}
+		if billingUserGroupID == nil {
+			billingUserGroupID = userGroupIDs.Primary()
+		}
+		if billingUserGroupID == nil {
+			billingUserGroupID = billUserGroupIDs.Primary()
+		}
+	}
+
+	if errBillingRule := s.ensureBillingRuleExists(ctx, provider, model, selected, authGroupIDByAuthKey, billingUserGroupID); errBillingRule != nil {
+		return nil, errBillingRule
+	}
+	if errLimit := s.applyRateLimit(ctx, provider, model, selected); errLimit != nil {
+		return nil, errLimit
+	}
+
+	if selected != nil {
 		applyBillingUserGroupIDToContext(ctx, billingUserGroupID)
 	}
 	return selected, nil
@@ -143,6 +162,151 @@ func (s *Selector) Pick(ctx context.Context, provider, model string, opts clipro
 
 func newModelNotFoundError(_ string, _ string) error {
 	return &coreauth.Error{Code: "model_not_found", Message: "model not found"}
+}
+
+func newBillingRuleNotFoundError(provider, model string) error {
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if provider == "" {
+		provider = "unknown"
+	}
+	if model == "" {
+		model = "unknown"
+	}
+	return &coreauth.Error{
+		Code:       "billing_rule_not_found",
+		Message:    fmt.Sprintf("billing rule not configured for provider=%s model=%s", provider, model),
+		HTTPStatus: http.StatusPaymentRequired,
+	}
+}
+
+func (s *Selector) ensureBillingRuleExists(
+	ctx context.Context,
+	provider, model string,
+	selected *coreauth.Auth,
+	authGroupIDByAuthKey map[string]uint64,
+	billingUserGroupID *uint64,
+) error {
+	if !shouldRequireBillingRule(ctx) {
+		return nil
+	}
+	if s == nil || s.db == nil || s.db.Config == nil {
+		return nil
+	}
+
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if mappedModel, ok := modelmapping.LookupMappedModelName(provider, model); ok && strings.TrimSpace(mappedModel) != "" {
+		model = strings.TrimSpace(mappedModel)
+	}
+	if provider == "" || model == "" {
+		return nil
+	}
+
+	defaultAuthGroupID, errDefaultAuthGroup := billing.ResolveDefaultAuthGroupID(ctx, s.db)
+	if errDefaultAuthGroup != nil {
+		return errDefaultAuthGroup
+	}
+	defaultUserGroupID, errDefaultUserGroup := billing.ResolveDefaultUserGroupID(ctx, s.db)
+	if errDefaultUserGroup != nil {
+		return errDefaultUserGroup
+	}
+
+	authGroupID := s.resolveSelectedAuthGroupID(ctx, selected, authGroupIDByAuthKey)
+	if authGroupID == 0 && defaultAuthGroupID != nil {
+		authGroupID = *defaultAuthGroupID
+	}
+
+	userGroupID := uint64(0)
+	if billingUserGroupID != nil {
+		userGroupID = *billingUserGroupID
+	}
+	if userGroupID == 0 {
+		userID, okUser := userIDFromContext(ctx)
+		if okUser {
+			userGroupIDs, billUserGroupIDs, errLoad := s.loadUserGroups(ctx, userID)
+			if errLoad != nil {
+				return errLoad
+			}
+			if primary := userGroupIDs.Primary(); primary != nil {
+				userGroupID = *primary
+			}
+			if userGroupID == 0 {
+				if primary := billUserGroupIDs.Primary(); primary != nil {
+					userGroupID = *primary
+				}
+			}
+		}
+	}
+	if userGroupID == 0 && defaultUserGroupID != nil {
+		userGroupID = *defaultUserGroupID
+	}
+	if authGroupID == 0 || userGroupID == 0 {
+		return newBillingRuleNotFoundError(provider, model)
+	}
+
+	defaultAuthGroupIDValue := uint64(0)
+	if defaultAuthGroupID != nil {
+		defaultAuthGroupIDValue = *defaultAuthGroupID
+	}
+	defaultUserGroupIDValue := uint64(0)
+	if defaultUserGroupID != nil {
+		defaultUserGroupIDValue = *defaultUserGroupID
+	}
+
+	q := s.db.WithContext(ctx).Model(&models.BillingRule{}).Where("is_enabled = ?", true)
+	if defaultAuthGroupIDValue != 0 && defaultUserGroupIDValue != 0 &&
+		(defaultAuthGroupIDValue != authGroupID || defaultUserGroupIDValue != userGroupID) {
+		q = q.Where(
+			"(auth_group_id = ? AND user_group_id = ?) OR (auth_group_id = ? AND user_group_id = ?)",
+			authGroupID, userGroupID, defaultAuthGroupIDValue, defaultUserGroupIDValue,
+		)
+	} else {
+		q = q.Where("auth_group_id = ? AND user_group_id = ?", authGroupID, userGroupID)
+	}
+	q = q.Where("((LOWER(provider) = ? AND model = ?) OR (provider = '' AND model = ''))", strings.ToLower(provider), model)
+
+	var rules []models.BillingRule
+	if errFind := q.Find(&rules).Error; errFind != nil {
+		return errFind
+	}
+	if rule := billing.SelectBillingRule(rules, authGroupID, userGroupID, defaultAuthGroupIDValue, defaultUserGroupIDValue, provider, model); rule == nil {
+		return newBillingRuleNotFoundError(provider, model)
+	}
+	return nil
+}
+
+func (s *Selector) resolveSelectedAuthGroupID(ctx context.Context, selected *coreauth.Auth, authGroupIDByAuthKey map[string]uint64) uint64 {
+	if selected == nil {
+		return 0
+	}
+	authKey := strings.TrimSpace(selected.ID)
+	if authKey == "" {
+		return 0
+	}
+	if authGroupIDByAuthKey != nil {
+		if id := authGroupIDByAuthKey[authKey]; id != 0 {
+			return id
+		}
+	}
+	if s == nil || s.db == nil || s.db.Config == nil {
+		return 0
+	}
+
+	var row struct {
+		AuthGroupID models.AuthGroupIDs `gorm:"column:auth_group_id"`
+	}
+	if errFind := s.db.WithContext(ctx).
+		Model(&models.Auth{}).
+		Select("auth_group_id").
+		Where("key = ?", authKey).
+		Take(&row).Error; errFind != nil {
+		return 0
+	}
+	if primary := row.AuthGroupID.Primary(); primary != nil {
+		return *primary
+	}
+	return 0
 }
 
 func (s *Selector) loadUserGroups(ctx context.Context, userID uint64) (models.UserGroupIDs, models.UserGroupIDs, error) {
@@ -618,6 +782,14 @@ func normalizeModelMappingSelector(value int) int {
 }
 
 func shouldApplyRateLimit(ctx context.Context) bool {
+	return shouldCheckRequestModel(ctx)
+}
+
+func shouldRequireBillingRule(ctx context.Context) bool {
+	return shouldCheckRequestModel(ctx)
+}
+
+func shouldCheckRequestModel(ctx context.Context) bool {
 	if ctx == nil {
 		return false
 	}
