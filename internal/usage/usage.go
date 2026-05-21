@@ -562,7 +562,14 @@ func calculateCost(ctx context.Context, db *gorm.DB, apiKeyID, userID, authID, b
 		case models.BillingTypePerToken:
 			var total float64
 			if rule.PriceInputToken != nil {
-				total += float64(record.Detail.InputTokens) * (*rule.PriceInputToken)
+				inputTokens := record.Detail.InputTokens
+				if record.Detail.CachedTokens > 0 {
+					inputTokens -= record.Detail.CachedTokens
+					if inputTokens < 0 {
+						inputTokens = 0
+					}
+				}
+				total += float64(inputTokens) * (*rule.PriceInputToken)
 			}
 			if rule.PriceOutputToken != nil {
 				total += float64(record.Detail.OutputTokens) * (*rule.PriceOutputToken)
