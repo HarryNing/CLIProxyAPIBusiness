@@ -74,7 +74,8 @@ func (h *QuotaHandler) List(c *gin.Context) {
 
 	base := h.db.WithContext(ctx).
 		Table("quota").
-		Joins("JOIN auths ON auths.id = quota.auth_id")
+		Joins("JOIN auths ON auths.id = quota.auth_id").
+		Where("auths.is_available = ?", true)
 	if keyQ != "" {
 		pattern := dbutil.NormalizeLikePattern(h.db, "%"+keyQ+"%")
 		base = base.Where(dbutil.CaseInsensitiveLikeExpr(h.db, "auths.key"), pattern)
@@ -94,7 +95,8 @@ func (h *QuotaHandler) List(c *gin.Context) {
 
 	typeQuery := h.db.WithContext(ctx).
 		Table("quota").
-		Joins("JOIN auths ON auths.id = quota.auth_id")
+		Joins("JOIN auths ON auths.id = quota.auth_id").
+		Where("auths.is_available = ?", true)
 	if keyQ != "" {
 		pattern := dbutil.NormalizeLikePattern(h.db, "%"+keyQ+"%")
 		typeQuery = typeQuery.Where(dbutil.CaseInsensitiveLikeExpr(h.db, "auths.key"), pattern)

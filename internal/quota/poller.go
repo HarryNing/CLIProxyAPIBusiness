@@ -257,6 +257,12 @@ func (p *Poller) pollAntigravity(ctx context.Context, auth *coreauth.Auth, row a
 		}
 		if status < http.StatusOK || status >= http.StatusMultipleChoices {
 			log.Warnf("quota poller: antigravity status=%d (auth=%s body=%s)", status, auth.ID, summarizePayload(payload))
+			if isTerminalAuthStatus(status) {
+				if errMark := p.markAuthUnavailable(ctx, row, auth.ID, status, payload); errMark != nil {
+					log.WithError(errMark).Warnf("quota poller: antigravity mark unavailable failed (auth=%s)", auth.ID)
+				}
+				return
+			}
 			continue
 		}
 		if errSave := p.saveQuota(ctx, row.ID, row.Type, payload); errSave != nil {
@@ -286,6 +292,11 @@ func (p *Poller) pollCodex(ctx context.Context, auth *coreauth.Auth, row authRow
 	}
 	if status < http.StatusOK || status >= http.StatusMultipleChoices {
 		log.Warnf("quota poller: codex status=%d (auth=%s body=%s)", status, auth.ID, summarizePayload(payload))
+		if isTerminalAuthStatus(status) {
+			if errMark := p.markAuthUnavailable(ctx, row, auth.ID, status, payload); errMark != nil {
+				log.WithError(errMark).Warnf("quota poller: codex mark unavailable failed (auth=%s)", auth.ID)
+			}
+		}
 		return
 	}
 	if errSave := p.saveQuota(ctx, row.ID, row.Type, payload); errSave != nil {
@@ -316,6 +327,11 @@ func (p *Poller) pollGeminiCLI(ctx context.Context, auth *coreauth.Auth, row aut
 	}
 	if status < http.StatusOK || status >= http.StatusMultipleChoices {
 		log.Warnf("quota poller: gemini-cli status=%d (auth=%s body=%s)", status, auth.ID, summarizePayload(payload))
+		if isTerminalAuthStatus(status) {
+			if errMark := p.markAuthUnavailable(ctx, row, auth.ID, status, payload); errMark != nil {
+				log.WithError(errMark).Warnf("quota poller: gemini-cli mark unavailable failed (auth=%s)", auth.ID)
+			}
+		}
 		return
 	}
 	if errSave := p.saveQuota(ctx, row.ID, row.Type, payload); errSave != nil {
@@ -354,6 +370,43 @@ func (p *Poller) doRequest(ctx context.Context, auth *coreauth.Auth, method, tar
 		return resp.StatusCode, nil, errRead
 	}
 	return resp.StatusCode, payload, nil
+}
+
+func isTerminalAuthStatus(status int) bool {
+	return status == http.StatusUnauthorized || status == http.StatusForbidden
+}
+
+func (p *Poller) markAuthUnavailable(ctx context.Context, row authRowInfo, authID string, status int, payload []byte) error {
+	if p == nil || p.db == nil {
+		return errors.New("quota poller: db not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	now := time.Now().UTC()
+	authID = strings.TrimSpace(authID)
+	return p.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if errUpdate := tx.Model(&models.Auth{}).
+			Where("id = ?", row.ID).
+			Updates(map[string]any{
+				"is_available": false,
+				"updated_at":   now,
+			}).Error; errUpdate != nil {
+			return errUpdate
+		}
+		if errDelete := tx.Where("auth_id = ?", row.ID).Delete(&models.Quota{}).Error; errDelete != nil {
+			return errDelete
+		}
+		log.Warnf(
+			"quota poller: auth marked unavailable after terminal status (auth=%s row_id=%d type=%s status=%d body=%s)",
+			authID,
+			row.ID,
+			row.Type,
+			status,
+			summarizePayload(payload),
+		)
+		return nil
+	})
 }
 
 func (p *Poller) saveQuota(ctx context.Context, authID uint64, authType string, payload []byte) error {
