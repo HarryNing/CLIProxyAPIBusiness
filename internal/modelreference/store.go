@@ -10,6 +10,8 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+const storeReferencesBatchSize = 100
+
 // StoreReferences upserts model references and prunes stale rows.
 func StoreReferences(ctx context.Context, db *gorm.DB, refs []models.ModelReference, syncTime time.Time) error {
 	if db == nil {
@@ -47,7 +49,7 @@ func StoreReferences(ctx context.Context, db *gorm.DB, refs []models.ModelRefere
 					"last_seen_at",
 					"updated_at",
 				}),
-			}).Create(&refs).Error; err != nil {
+			}).CreateInBatches(refs, storeReferencesBatchSize).Error; err != nil {
 				return fmt.Errorf("store model references: upsert: %w", err)
 			}
 		}
